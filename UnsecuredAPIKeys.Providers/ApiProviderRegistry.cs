@@ -6,46 +6,54 @@ namespace UnsecuredAPIKeys.Providers
 {
     public static class ApiProviderRegistry
     {
-        private static readonly Lazy<List<IApiKeyProvider>> _allProviders = new(() =>
+        /// <summary>
+        /// Optional comma-separated provider name filter, e.g. "Groq" or "Groq,OpenAI".
+        /// Set via env var UNSECURED_APIKEYS_PROVIDER_FILTER.
+        /// </summary>
+        private static readonly HashSet<string>? _providerNameFilter = ParseProviderFilter(
+            Environment.GetEnvironmentVariable("UNSECURED_APIKEYS_PROVIDER_FILTER"));
+
+        private static HashSet<string>? ParseProviderFilter(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            var names = raw
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(n => n.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return names.Count == 0 ? null : names;
+        }
+
+        private static bool PassesNameFilter(IApiKeyProvider provider) =>
+            _providerNameFilter is null || _providerNameFilter.Contains(provider.ProviderName);
+
+        private static List<IApiKeyProvider> CreateProviders(Func<Type, ApiProviderAttribute, bool> predicate)
         {
             return [.. Assembly.GetExecutingAssembly()
                 .GetTypes()
-                .Where(type => type.GetCustomAttribute<ApiProviderAttribute>() != null
-                               && typeof(IApiKeyProvider).IsAssignableFrom(type)
-                               && !type.IsInterface
-                               && !type.IsAbstract)
-                .Select(type => (IApiKeyProvider)Activator.CreateInstance(type)!)];
-        });
+                .Where(type =>
+                {
+                    var attr = type.GetCustomAttribute<ApiProviderAttribute>();
+                    return attr != null
+                           && predicate(type, attr)
+                           && typeof(IApiKeyProvider).IsAssignableFrom(type)
+                           && !type.IsInterface
+                           && !type.IsAbstract;
+                })
+                .Select(type => (IApiKeyProvider)Activator.CreateInstance(type)!)
+                .Where(PassesNameFilter)];
+        }
+
+        private static readonly Lazy<List<IApiKeyProvider>> _allProviders = new(() =>
+            CreateProviders((_, _) => true));
 
         private static readonly Lazy<List<IApiKeyProvider>> _scraperProviders = new(() =>
-        {
-            return [.. Assembly.GetExecutingAssembly()
-                .GetTypes()
-                .Where(type => {
-                    var attr = type.GetCustomAttribute<ApiProviderAttribute>();
-                    return attr != null
-                           && attr.ScraperUse
-                           && typeof(IApiKeyProvider).IsAssignableFrom(type)
-                           && !type.IsInterface
-                           && !type.IsAbstract;
-                })
-                .Select(type => (IApiKeyProvider)Activator.CreateInstance(type)!)];
-        });
+            CreateProviders((_, attr) => attr.ScraperUse));
 
         private static readonly Lazy<List<IApiKeyProvider>> _verifierProviders = new(() =>
-        {
-            return [.. Assembly.GetExecutingAssembly()
-                .GetTypes()
-                .Where(type => {
-                    var attr = type.GetCustomAttribute<ApiProviderAttribute>();
-                    return attr != null
-                           && attr.VerificationUse
-                           && typeof(IApiKeyProvider).IsAssignableFrom(type)
-                           && !type.IsInterface
-                           && !type.IsAbstract;
-                })
-                .Select(type => (IApiKeyProvider)Activator.CreateInstance(type)!)];
-        });
+            CreateProviders((_, attr) => attr.VerificationUse));
 
         /// <summary>
         /// Gets all providers with ApiProvider attribute (backward compatibility)

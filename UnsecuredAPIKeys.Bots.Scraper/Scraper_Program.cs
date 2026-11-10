@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection; // Added for DI
 // Added for IHttpClientFactory
 using Microsoft.Extensions.Logging;
@@ -128,21 +129,26 @@ namespace UnsecuredAPIKeys.Bots.Scraper
         private static async Task Main()
         {
             _cancellationTokenSource = new CancellationTokenSource();
+
+            var configuration = BuildConfiguration();
             
             // --- Setup Dependency Injection ---
             var serviceCollection = new ServiceCollection();
-            ConfigureServices(serviceCollection);
+            ConfigureServices(serviceCollection, configuration);
             await using var serviceProvider = serviceCollection.BuildServiceProvider();
 
             var loggerFactory = serviceProvider.GetService<ILoggerFactory>();
             var logger = loggerFactory?.CreateLogger("Scraper_Program");
 
+            var providerFilter = Environment.GetEnvironmentVariable("UNSECURED_APIKEYS_PROVIDER_FILTER");
             Console.WriteLine("========================================");
             Console.WriteLine(" API Key Scanner (Enhanced Version)    ");
             Console.WriteLine("========================================");
             Console.WriteLine($"System Info - CPU Cores: {Environment.ProcessorCount}, Max Concurrency: {MaxConcurrentRequests}, Batch Size: {OptimalBatchSize}");
+            Console.WriteLine($"Provider filter: {(string.IsNullOrWhiteSpace(providerFilter) ? "(all providers)" : providerFilter)}");
             logger?.LogInformation("System Info - CPU Cores: {CpuCores}, Max Concurrency: {MaxConcurrency}, Batch Size: {BatchSize}",
                 Environment.ProcessorCount, MaxConcurrentRequests, OptimalBatchSize);
+            logger?.LogInformation("Provider filter: {ProviderFilter}", string.IsNullOrWhiteSpace(providerFilter) ? "(all providers)" : providerFilter);
 
             // Start memory monitoring task
             _ = Task.Run(async () => await MonitorResourcesAsync(logger));
@@ -432,8 +438,36 @@ namespace UnsecuredAPIKeys.Bots.Scraper
             logger?.LogInformation("Overall Run Summary: Processed={ProcessedCount}, NewKeys={NewKeysFound}, DuplicateKeys={DuplicateKeysFound}. Scan cycle finished.", processedCount, _newKeysFound, _duplicateKeysFound);
         }
 
-        private static void ConfigureServices(IServiceCollection services)
+        private static IConfiguration BuildConfiguration()
         {
+            return new ConfigurationBuilder()
+                .SetBasePath(AppContext.BaseDirectory)
+                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+                .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+                .AddUserSecrets(typeof(Scraper_Program).Assembly, optional: true)
+                .AddEnvironmentVariables()
+                .Build();
+        }
+
+        private static string ResolveConnectionString(IConfiguration configuration)
+        {
+            var connectionString =
+                configuration.GetConnectionString("DefaultConnection")
+                ?? configuration["ConnectionStrings:DefaultConnection"]
+                ?? Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection");
+
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                throw new InvalidOperationException(
+                    "Database connection string not found. Set ConnectionStrings:DefaultConnection via user-secrets, appsettings, or env var ConnectionStrings__DefaultConnection.");
+            }
+
+            return connectionString;
+        }
+
+        private static void ConfigureServices(IServiceCollection services, IConfiguration configuration)
+        {
+            services.AddSingleton(configuration);
             services.AddLogging(builder =>
             {
                 builder
@@ -444,10 +478,12 @@ namespace UnsecuredAPIKeys.Bots.Scraper
                     .AddConsole();
             });
 
+            var connectionString = ResolveConnectionString(configuration);
+
             services.AddHttpClient();
             services.AddDbContextPool<DBContext>(options =>
             {
-                options.UseNpgsql("Host=localhost;Database=UnsecuredAPIKeys;Username=postgres;Password=your_password;Port=5432", npgsqlOptions =>
+                options.UseNpgsql(connectionString, npgsqlOptions =>
                 {
                     npgsqlOptions.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
                     npgsqlOptions.EnableRetryOnFailure(3);

@@ -368,8 +368,10 @@ namespace UnsecuredAPIKeys.Bots.Verifier
 
             // Load configuration
             _configuration = new ConfigurationBuilder()
+                .SetBasePath(AppContext.BaseDirectory)
                 .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
                 .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+                .AddUserSecrets(typeof(Verifier_Program).Assembly, optional: true)
                 .AddEnvironmentVariables()
                 .Build();
 
@@ -1447,9 +1449,19 @@ namespace UnsecuredAPIKeys.Bots.Verifier
 
             services.AddHttpClient(); // Generic factory for providers
 
+            var connectionString =
+                _configuration?.GetConnectionString("DefaultConnection")
+                ?? Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection");
+
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                throw new InvalidOperationException(
+                    "Database connection string not found. Set ConnectionStrings:DefaultConnection via user-secrets, appsettings, or env var ConnectionStrings__DefaultConnection.");
+            }
+
             services.AddDbContext<DBContext>(options =>
             {
-                options.UseNpgsql("Host=localhost;Database=UnsecuredAPIKeys;Username=postgres;Password=your_password;Port=5432", npgsqlOptions =>
+                options.UseNpgsql(connectionString, npgsqlOptions =>
                 {
                     npgsqlOptions.UseQuerySplittingBehavior(QuerySplittingBehavior.SplitQuery);
                     npgsqlOptions.EnableRetryOnFailure(3);
